@@ -45,6 +45,18 @@ export class FileWatcher {
             this.debounce(absPath, dir);
           }
         );
+        // Handle watcher errors gracefully — transient files (e.g. sed -i
+        // temp files) can cause EACCES when the watcher tries to observe a
+        // file that's already been deleted.
+        watcher.on("error", (err: NodeJS.ErrnoException) => {
+          if (err.code === "EACCES" || err.code === "ENOENT") {
+            // Transient file — ignore silently
+            return;
+          }
+          console.error(
+            `knowledge-search: watcher error for ${dir}: ${err.message}`
+          );
+        });
         this.watchers.push(watcher);
       } catch (err: any) {
         console.error(
