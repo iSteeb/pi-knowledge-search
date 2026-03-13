@@ -5,13 +5,13 @@ Semantic search over local files for [pi](https://github.com/badlogic/pi). Index
 ## Install
 
 ```bash
-pi install git:github.com/samfperry/pi-knowledge-search
+pi install git:github.com/samfoy/pi-knowledge-search
 ```
 
 Or try without installing:
 
 ```bash
-pi -e git:github.com/samfperry/pi-knowledge-search
+pi -e git:github.com/samfoy/pi-knowledge-search
 ```
 
 ## Setup
