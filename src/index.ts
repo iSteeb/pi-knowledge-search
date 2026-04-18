@@ -1,5 +1,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { fork } from "node:child_process";
+import { join } from "node:path";
 import {
   loadConfig,
   saveConfig,
@@ -15,68 +17,66 @@ export default function (pi: ExtensionAPI) {
   let index: KnowledgeIndex | null = null;
   let watcher: FileWatcher | null = null;
   let currentConfig: Config | null = null;
+  let syncDone = false;
 
   // ------------------------------------------------------------------
   // Lifecycle
   // ------------------------------------------------------------------
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", (_event, ctx) => {
     try {
       currentConfig = loadConfig();
-    } catch (err: any) {
-      ctx.ui.notify(`knowledge-search: ${err.message}`, "warning");
+    } catch {
       return;
     }
+    if (!currentConfig) return;
 
-    if (!currentConfig) {
-      // Not configured yet — silent, user can run /knowledge-search-setup
-      return;
-    }
+    const embedder = createEmbedder(currentConfig.provider, currentConfig.dimensions);
+    index = new KnowledgeIndex(currentConfig, embedder);
+    index.loadSync();
 
-    // Fire-and-forget: don't block session startup if indexing is slow
-    // (e.g. embedder credentials are unavailable). The search tool already
-    // handles the index not being ready gracefully.
-    void startIndex(currentConfig, ctx);
+    watcher = new FileWatcher(currentConfig, index);
+    watcher.start();
+
+    // Sync in a child process so it never blocks the main event loop
+    const worker = fork(
+      join(import.meta.dirname, "sync-worker.ts"),
+      [],
+      {
+        execArgv: ["--import", "tsx/esm"],
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+        env: { ...process.env },
+      }
+    );
+
+    let stdout = "";
+    worker.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    worker.on("exit", (code) => {
+      syncDone = true;
+      if (code === 0 && stdout) {
+        try {
+          const result = JSON.parse(stdout);
+          // Reload the index from disk since the worker updated it
+          index!.loadSync();
+          const changes = result.added + result.updated + result.removed;
+          if (changes > 0) {
+            ctx.ui.setStatus(
+              "knowledge-search",
+              `Index: +${result.added} ~${result.updated} -${result.removed} (${result.size} files)`
+            );
+            setTimeout(() => ctx.ui.setStatus("knowledge-search", ""), 5000);
+          }
+        } catch {
+          // ignore parse errors
+        }
+      }
+    });
+    worker.unref();
   });
 
   pi.on("session_shutdown", async () => {
     watcher?.stop();
   });
-
-  async function startIndex(config: Config, ctx: any) {
-    try {
-      const embedder = createEmbedder(config.provider, config.dimensions);
-      index = new KnowledgeIndex(config, embedder);
-      await index.load();
-
-      // Sync with a timeout so a hung embedder doesn't block forever.
-      // The loaded cache is still usable for searches even if sync times out.
-      const SYNC_TIMEOUT_MS = 60_000;
-      const syncResult = await Promise.race([
-        index.sync(),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), SYNC_TIMEOUT_MS)),
-      ]);
-
-      if (syncResult === null) {
-        ctx.ui.notify("knowledge-search: sync timed out (index may be stale)", "warning");
-      } else {
-        const { added, updated, removed } = syncResult;
-        const changes = added + updated + removed;
-        if (changes > 0) {
-          ctx.ui.setStatus(
-            "knowledge-search",
-            `Index: +${added} ~${updated} -${removed} (${index.size()} files)`
-          );
-          setTimeout(() => ctx.ui.setStatus("knowledge-search", ""), 5000);
-        }
-      }
-
-      watcher = new FileWatcher(config, index);
-      watcher.start();
-    } catch (err: any) {
-      ctx.ui.notify(`knowledge-search init failed: ${err.message}`, "error");
-    }
-  }
 
   // ------------------------------------------------------------------
   // Setup command
@@ -265,7 +265,9 @@ export default function (pi: ExtensionAPI) {
       if (!index || index.size() === 0) {
         const msg = !index
           ? 'knowledge-search is not configured. The user can run /knowledge-search-setup to set it up.'
-          : "Index is empty — it may still be building. Try again in a moment.";
+          : syncDone
+            ? "Index is empty."
+            : "Index is still syncing in the background. Try again in a moment.";
         return { content: [{ type: "text", text: msg }], details: {} };
       }
 
@@ -288,7 +290,7 @@ export default function (pi: ExtensionAPI) {
 
         const home = process.env.HOME || "";
         const output = results
-          .map((r, i) => {
+          .map((r: any, i: number) => {
             const displayPath = r.path.replace(home, "~");
             const score = (r.score * 100).toFixed(1);
             return `### ${i + 1}. ${displayPath} (${score}% match)\n\n${r.excerpt}`;

@@ -55,6 +55,10 @@ export class KnowledgeIndex {
     return Object.keys(this.data.entries).length;
   }
 
+  loadSync(): void {
+    this.load();
+  }
+
   async load(): Promise<void> {
     const indexFile = path.join(this.config.indexDir, "index.json");
     if (fs.existsSync(indexFile)) {
