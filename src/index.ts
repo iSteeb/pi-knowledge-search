@@ -35,9 +35,6 @@ export default function (pi: ExtensionAPI) {
     index = new KnowledgeIndex(currentConfig, embedder);
     index.loadSync();
 
-    watcher = new FileWatcher(currentConfig, index);
-    watcher.start();
-
     // Sync in a child process so it never blocks the main event loop
     const worker = fork(
       join(import.meta.dirname, "sync-worker.ts"),
