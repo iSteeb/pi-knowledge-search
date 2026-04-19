@@ -24,7 +24,7 @@ const index = new KnowledgeIndex(config, embedder);
 index.loadSync();
 
 index.sync().then(({ added, updated, removed }) => {
-  const result = JSON.stringify({ added, updated, removed, size: index.size() });
+  const result = JSON.stringify({ added, updated, removed, size: index.size(), chunks: index.chunkCount() });
   process.stdout.write(result);
   process.exit(0);
 }).catch((err) => {

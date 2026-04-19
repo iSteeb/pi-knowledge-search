@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Config } from "./config";
 import type { Embedder } from "./embedder";
+import { chunkMarkdown, type Chunk } from "./chunker";
 
 interface IndexEntry {
   /** Relative path from its source directory root */
@@ -12,14 +13,18 @@ interface IndexEntry {
   mtime: number;
   /** Embedding vector */
   vector: number[];
-  /** First ~2000 chars of content for excerpt display */
+  /** This chunk's content for excerpt display */
   excerpt: string;
+  /** Section heading this chunk falls under */
+  heading: string;
+  /** Chunk index (0, 1, 2... for multi-chunk files) */
+  chunkIndex: number;
 }
 
 interface IndexData {
   version: number;
   dimensions: number;
-  entries: Record<string, IndexEntry>; // keyed by absolute path
+  entries: Record<string, IndexEntry>; // keyed by "absPath#chunkIndex"
 }
 
 export interface SearchResult {
@@ -27,12 +32,14 @@ export interface SearchResult {
   path: string;
   /** Cosine similarity score (0-1) */
   score: number;
-  /** Content excerpt */
+  /** Content excerpt (the matched chunk) */
   excerpt: string;
+  /** Section heading for context */
+  heading: string;
 }
 
-const INDEX_VERSION = 2;
-const EXCERPT_LENGTH = 2000;
+const INDEX_VERSION = 3; // Bumped from 2 for chunk support
+const MAX_EXCERPT_LENGTH = 3500; // Safety cap for stored excerpts
 
 export class KnowledgeIndex {
   private config: Config;
@@ -52,6 +59,15 @@ export class KnowledgeIndex {
   }
 
   size(): number {
+    // Count unique file paths (not chunks)
+    const paths = new Set<string>();
+    for (const entry of Object.values(this.data.entries)) {
+      paths.add(`${entry.sourceDir}/${entry.relPath}`);
+    }
+    return paths.size;
+  }
+
+  chunkCount(): number {
     return Object.keys(this.data.entries).length;
   }
 
@@ -67,6 +83,7 @@ export class KnowledgeIndex {
         ) {
           this.data = parsed;
         }
+        // Old version or dimension mismatch → start fresh (triggers re-index)
       } catch {
         // Corrupted — start fresh
       }
@@ -94,6 +111,47 @@ export class KnowledgeIndex {
   }
 
   /**
+   * Build the entry key for a file chunk.
+   */
+  private entryKey(absPath: string, chunkIndex: number): string {
+    return `${absPath}#${chunkIndex}`;
+  }
+
+  /**
+   * Get the absolute path from an entry key (strip #chunkIndex).
+   */
+  private absPathFromKey(key: string): string {
+    const hashIdx = key.lastIndexOf("#");
+    return hashIdx >= 0 ? key.slice(0, hashIdx) : key;
+  }
+
+  /**
+   * Remove all chunks for a given absolute file path.
+   */
+  private removeAllChunks(absPath: string): number {
+    const prefix = absPath + "#";
+    const toRemove: string[] = [];
+    for (const key of Object.keys(this.data.entries)) {
+      if (key.startsWith(prefix)) {
+        toRemove.push(key);
+      }
+    }
+    for (const key of toRemove) {
+      delete this.data.entries[key];
+    }
+    return toRemove.length;
+  }
+
+  /**
+   * Prepare embedding text for a chunk with title context.
+   */
+  private chunkEmbedText(relPath: string, heading: string, chunkText: string): string {
+    const title = relPath.replace(/\.[^.]+$/, "").replace(/\//g, " > ");
+    const sectionContext = heading && heading !== "intro" ? ` > ${heading}` : "";
+    return `Title: ${title}${sectionContext}\n\n${chunkText}`;
+  }
+
+  /**
    * Scan all configured directories, find new/changed/removed files, update index.
    */
   async sync(): Promise<{ added: number; updated: number; removed: number }> {
@@ -101,69 +159,105 @@ export class KnowledgeIndex {
     const currentPaths = new Set(allFiles.map((f) => f.absPath));
 
     // Remove entries for files that no longer exist
-    const removedPaths: string[] = [];
-    for (const absPath of Object.keys(this.data.entries)) {
-      if (!currentPaths.has(absPath)) {
-        removedPaths.push(absPath);
+    let removed = 0;
+    const seenRemoved = new Set<string>();
+    for (const key of Object.keys(this.data.entries)) {
+      const absPath = this.absPathFromKey(key);
+      if (!currentPaths.has(absPath) && !seenRemoved.has(absPath)) {
+        seenRemoved.add(absPath);
+        removed += 1;
+        this.removeAllChunks(absPath);
       }
-    }
-    for (const p of removedPaths) {
-      delete this.data.entries[p];
     }
 
     // Find new or updated files
-    const toEmbed: {
+    const toProcess: {
       absPath: string;
       relPath: string;
       sourceDir: string;
       mtime: number;
       content: string;
+      chunks: Chunk[];
     }[] = [];
 
     for (const file of allFiles) {
-      const existing = this.data.entries[file.absPath];
-      if (!existing || existing.mtime < file.mtime) {
-        const content = this.readFileContent(file.absPath);
-        if (content && content.trim().length > 20) {
-          toEmbed.push({ ...file, content });
-        }
-      }
+      // Check if any chunk exists for this file with current mtime
+      const existingKey = this.entryKey(file.absPath, 0);
+      const existing = this.data.entries[existingKey];
+      if (existing && existing.mtime >= file.mtime) continue;
+
+      const content = this.readFileContent(file.absPath);
+      if (!content || content.trim().length <= 20) continue;
+
+      const chunks = chunkMarkdown(content);
+      if (chunks.length === 0) continue;
+
+      toProcess.push({ ...file, content, chunks });
     }
 
     let added = 0;
     let updated = 0;
 
-    if (toEmbed.length > 0) {
-      const texts = toEmbed.map((f) => {
-        const title = f.relPath.replace(/\.[^.]+$/, "").replace(/\//g, " > ");
-        return `Title: ${title}\n\n${f.content}`;
-      });
+    if (toProcess.length > 0) {
+      // Flatten all chunks for batch embedding
+      const allChunkTexts: string[] = [];
+      const chunkMeta: { fileIdx: number; chunkIdx: number }[] = [];
 
-      const BATCH_SIZE = 50;
-      for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-        const batchTexts = texts.slice(i, i + BATCH_SIZE);
-        const batchFiles = toEmbed.slice(i, i + BATCH_SIZE);
-        const vectors = await this.embedder.embedBatch(batchTexts);
-
-        for (let j = 0; j < batchFiles.length; j++) {
-          const vector = vectors[j];
-          if (!vector) continue;
-          const file = batchFiles[j];
-          const isNew = !this.data.entries[file.absPath];
-          this.data.entries[file.absPath] = {
-            relPath: file.relPath,
-            sourceDir: file.sourceDir,
-            mtime: file.mtime,
-            vector,
-            excerpt: file.content.slice(0, EXCERPT_LENGTH),
-          };
-          if (isNew) added++;
-          else updated++;
+      for (let fi = 0; fi < toProcess.length; fi++) {
+        const file = toProcess[fi];
+        for (let ci = 0; ci < file.chunks.length; ci++) {
+          const chunk = file.chunks[ci];
+          allChunkTexts.push(
+            this.chunkEmbedText(file.relPath, chunk.heading, chunk.text)
+          );
+          chunkMeta.push({ fileIdx: fi, chunkIdx: ci });
         }
+      }
+
+      // Embed in batches
+      const BATCH_SIZE = 50;
+      const allVectors: (number[] | null)[] = new Array(allChunkTexts.length).fill(null);
+
+      for (let i = 0; i < allChunkTexts.length; i += BATCH_SIZE) {
+        const batchTexts = allChunkTexts.slice(i, i + BATCH_SIZE);
+        const vectors = await this.embedder.embedBatch(batchTexts);
+        for (let j = 0; j < vectors.length; j++) {
+          allVectors[i + j] = vectors[j];
+        }
+      }
+
+      // Store results, grouped by file
+      const processedFiles = new Set<number>();
+
+      for (let i = 0; i < chunkMeta.length; i++) {
+        const { fileIdx, chunkIdx } = chunkMeta[i];
+        const vector = allVectors[i];
+        if (!vector) continue;
+
+        const file = toProcess[fileIdx];
+
+        // On first chunk of a file, remove old chunks and track add/update
+        if (!processedFiles.has(fileIdx)) {
+          processedFiles.add(fileIdx);
+          const hadExisting = this.removeAllChunks(file.absPath) > 0;
+          if (hadExisting) updated++;
+          else added++;
+        }
+
+        const chunk = file.chunks[chunkIdx];
+        const key = this.entryKey(file.absPath, chunkIdx);
+        this.data.entries[key] = {
+          relPath: file.relPath,
+          sourceDir: file.sourceDir,
+          mtime: file.mtime,
+          vector,
+          excerpt: chunk.text.slice(0, MAX_EXCERPT_LENGTH),
+          heading: chunk.heading,
+          chunkIndex: chunkIdx,
+        };
       }
     }
 
-    const removed = removedPaths.length;
     if (added + updated + removed > 0) {
       this.save();
     }
@@ -183,23 +277,37 @@ export class KnowledgeIndex {
   ): Promise<SearchResult[]> {
     const queryVector = await this.embedder.embed(query, signal);
 
-    const scored: { absPath: string; score: number }[] = [];
-    for (const [absPath, entry] of Object.entries(this.data.entries)) {
-      if (!entry.vector) continue; // skip corrupted/null entries
+    const scored: { key: string; absPath: string; score: number }[] = [];
+    for (const [key, entry] of Object.entries(this.data.entries)) {
+      if (!entry.vector) continue;
       const score = dotProduct(queryVector, entry.vector);
-      scored.push({ absPath, score });
+      scored.push({ key, absPath: this.absPathFromKey(key), score });
     }
 
     scored.sort((a, b) => b.score - a.score);
 
-    return scored
-      .slice(0, limit)
+    // Deduplicate: keep only the best-scoring chunk per file
+    const seenPaths = new Set<string>();
+    const deduped: { key: string; absPath: string; score: number }[] = [];
+
+    for (const item of scored) {
+      if (seenPaths.has(item.absPath)) continue;
+      seenPaths.add(item.absPath);
+      deduped.push(item);
+      if (deduped.length >= limit) break;
+    }
+
+    return deduped
       .filter((s) => s.score > 0.15)
-      .map((s) => ({
-        path: s.absPath,
-        score: s.score,
-        excerpt: this.data.entries[s.absPath].excerpt,
-      }));
+      .map((s) => {
+        const entry = this.data.entries[s.key];
+        return {
+          path: s.absPath,
+          score: s.score,
+          excerpt: entry.excerpt,
+          heading: entry.heading,
+        };
+      });
   }
 
   /**
@@ -221,28 +329,42 @@ export class KnowledgeIndex {
       return;
     }
 
-    const title = relPath.replace(/\.[^.]+$/, "").replace(/\//g, " > ");
-    const text = `Title: ${title}\n\n${content}`;
-    const vector = await this.embedder.embed(text);
-
-    if (!vector) {
-      // Embedding failed — don't store a null vector
+    const chunks = chunkMarkdown(content);
+    if (chunks.length === 0) {
+      this.removeFile(absPath);
       return;
     }
 
-    this.data.entries[absPath] = {
-      relPath,
-      sourceDir,
-      mtime: stat.mtimeMs,
-      vector,
-      excerpt: content.slice(0, EXCERPT_LENGTH),
-    };
+    // Remove old chunks for this file
+    this.removeAllChunks(absPath);
+
+    // Embed and store each chunk
+    const texts = chunks.map((c) =>
+      this.chunkEmbedText(relPath, c.heading, c.text)
+    );
+    const vectors = await this.embedder.embedBatch(texts);
+
+    for (let i = 0; i < chunks.length; i++) {
+      const vector = vectors[i];
+      if (!vector) continue;
+
+      const key = this.entryKey(absPath, i);
+      this.data.entries[key] = {
+        relPath,
+        sourceDir,
+        mtime: stat.mtimeMs,
+        vector,
+        excerpt: chunks[i].text.slice(0, MAX_EXCERPT_LENGTH),
+        heading: chunks[i].heading,
+        chunkIndex: i,
+      };
+    }
     this.scheduleSave();
   }
 
   removeFile(absPath: string): void {
-    if (this.data.entries[absPath]) {
-      delete this.data.entries[absPath];
+    const removed = this.removeAllChunks(absPath);
+    if (removed > 0) {
       this.scheduleSave();
     }
   }

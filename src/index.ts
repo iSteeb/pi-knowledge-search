@@ -68,7 +68,7 @@ export default function (pi: ExtensionAPI) {
             if (changes > 0) {
               ctx.ui.setStatus(
                 "knowledge-search",
-                `Index: +${result.added} ~${result.updated} -${result.removed} (${result.size} files)`
+                `Index: +${result.added} ~${result.updated} -${result.removed} (${result.size} files, ${result.chunks} chunks)`
               );
               setTimeout(() => ctx.ui.setStatus("knowledge-search", ""), 5000);
             }
@@ -253,7 +253,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify("Re-indexing...", "info");
       try {
         await index.rebuild();
-        ctx.ui.notify(`Re-indexed: ${index.size()} files`, "success");
+        ctx.ui.notify(`Re-indexed: ${index.size()} files (${index.chunkCount()} chunks)`, "success");
       } catch (err: any) {
         ctx.ui.notify(`Re-index failed: ${err.message}`, "error");
       }
@@ -312,11 +312,12 @@ export default function (pi: ExtensionAPI) {
           .map((r: any, i: number) => {
             const displayPath = r.path.replace(home, "~");
             const score = (r.score * 100).toFixed(1);
-            return `### ${i + 1}. ${displayPath} (${score}% match)\n\n${r.excerpt}`;
+            const heading = r.heading && r.heading !== "intro" ? ` > ${r.heading}` : "";
+            return `### ${i + 1}. ${displayPath}${heading} (${score}% match)\n\n${r.excerpt}`;
           })
           .join("\n\n---\n\n");
 
-        const header = `Found ${results.length} results for "${params.query}" (${index.size()} files indexed):\n\n`;
+        const header = `Found ${results.length} results for "${params.query}" (${index.size()} files, ${index.chunkCount()} chunks indexed):\n\n`;
 
         return {
           content: [{ type: "text", text: header + output }],
