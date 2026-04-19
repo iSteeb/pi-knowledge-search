@@ -56,10 +56,6 @@ export class KnowledgeIndex {
   }
 
   loadSync(): void {
-    this.load();
-  }
-
-  async load(): Promise<void> {
     const indexFile = path.join(this.config.indexDir, "index.json");
     if (fs.existsSync(indexFile)) {
       try {
@@ -75,6 +71,10 @@ export class KnowledgeIndex {
         // Corrupted — start fresh
       }
     }
+  }
+
+  async load(): Promise<void> {
+    this.loadSync();
   }
 
   private save(): void {
@@ -353,7 +353,8 @@ export class KnowledgeIndex {
 /** Dot product — works as cosine similarity when vectors are pre-normalized. */
 function dotProduct(a: number[], b: number[]): number {
   let sum = 0;
-  for (let i = 0; i < a.length; i++) {
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
     sum += a[i] * b[i];
   }
   return sum;

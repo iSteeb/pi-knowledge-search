@@ -11,7 +11,6 @@ import {
 } from "./config";
 import { createEmbedder } from "./embedder";
 import { KnowledgeIndex } from "./index-store";
-import { FileWatcher } from "./watcher";
 
 export default function (pi: ExtensionAPI) {
   let index: KnowledgeIndex | null = null;
@@ -94,7 +93,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     workerExitExpected = true;
-    watcher?.stop();
+    // watcher removed (d38a81f) — caused UI freezes. Rely on sync-on-startup only.
     index?.close();
   });
 
