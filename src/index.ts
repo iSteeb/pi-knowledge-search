@@ -14,7 +14,6 @@ import { KnowledgeIndex } from "./index-store";
 
 export default function (pi: ExtensionAPI) {
   let index: KnowledgeIndex | null = null;
-  let watcher: FileWatcher | null = null;
   let currentConfig: Config | null = null;
   let syncDone = false;
   let workerExitExpected = false;
@@ -36,6 +35,11 @@ export default function (pi: ExtensionAPI) {
     index.loadSync();
 
     // Sync in a child process so it never blocks the main event loop
+    const MAX_WORKER_RESTARTS = 3;
+    const RESTART_WINDOW_MS = 60_000;
+    let workerRestartCount = 0;
+    let workerRestartWindowStart = Date.now();
+
     function spawnWorker() {
       const worker = fork(
         join(import.meta.dirname, "sync-worker.ts"),
@@ -76,13 +80,26 @@ export default function (pi: ExtensionAPI) {
             // ignore parse errors
           }
         } else if (code !== 0 && !workerExitExpected) {
-          // Unexpected exit — restart once
-          console.error(
-            `knowledge-search: worker exited unexpectedly (code=${code}, signal=${signal}), restarting...`
-          );
-          setTimeout(() => {
-            if (!workerExitExpected) spawnWorker();
-          }, 2000);
+          const now = Date.now();
+          // Reset counter if outside the time window
+          if (now - workerRestartWindowStart > RESTART_WINDOW_MS) {
+            workerRestartCount = 0;
+            workerRestartWindowStart = now;
+          }
+          workerRestartCount++;
+
+          if (workerRestartCount > MAX_WORKER_RESTARTS) {
+            console.error(
+              `knowledge-search: worker crashed ${workerRestartCount} times within ${RESTART_WINDOW_MS / 1000}s, giving up`
+            );
+          } else {
+            console.error(
+              `knowledge-search: worker exited unexpectedly (code=${code}, signal=${signal}), restarting (${workerRestartCount}/${MAX_WORKER_RESTARTS})...`
+            );
+            setTimeout(() => {
+              if (!workerExitExpected) spawnWorker();
+            }, 2000);
+          }
         }
       });
       worker.unref();

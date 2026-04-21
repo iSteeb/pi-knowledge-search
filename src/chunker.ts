@@ -38,10 +38,6 @@ export function chunkMarkdown(
 ): Chunk[] {
   if (!content || content.trim().length === 0) return [];
 
-  // Extract document title from first # heading (level 1 only)
-  const titleMatch = content.match(/^#\s+(.+)$/m);
-  const _docTitle = titleMatch ? titleMatch[1].trim() : "";
-
   // Split into sections by ## headings
   const sections = splitByHeadings(content);
 
