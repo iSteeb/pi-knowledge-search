@@ -45,7 +45,7 @@ export default function (pi: ExtensionAPI) {
         join(import.meta.dirname, "sync-worker.ts"),
         [],
         {
-          execArgv: ["--import", "tsx"],
+          execArgv: ["--import", import.meta.resolve("tsx")],
           stdio: ["ignore", "pipe", "pipe", "ipc"],
           env: { ...process.env },
         }

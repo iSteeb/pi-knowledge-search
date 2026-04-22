@@ -4,6 +4,14 @@ Semantic search over local files for [pi](https://github.com/badlogic/pi). Index
 
 ## Install
 
+**Recommended:** Install [pi-total-recall](https://github.com/samfoy/pi-total-recall) to get the complete context stack — persistent memory, session history search, and local knowledge search in one package:
+
+```bash
+pi install pi-total-recall
+```
+
+Or install pi-knowledge-search standalone:
+
 ```bash
 pi install git:github.com/samfoy/pi-knowledge-search
 ```
