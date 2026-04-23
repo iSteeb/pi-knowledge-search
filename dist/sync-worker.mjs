@@ -567,7 +567,7 @@ ${chunkText}`;
       const existing = this.data.entries[existingKey];
       if (existing && existing.mtime >= file.mtime) continue;
       const content = this.readFileContent(file.absPath);
-      if (!content || content.trim().length <= 20) continue;
+      if (!content || content.trim().length === 0) continue;
       const chunks = chunkMarkdown(content);
       if (chunks.length === 0) continue;
       toProcess.push({ ...file, content, chunks });
