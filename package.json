@@ -29,7 +29,8 @@
     "tsx": "^4.21.0"
   },
   "scripts": {
-    "test": "node --test --import tsx src/**/*.test.ts"
+    "test": "node --test --import tsx src/**/*.test.ts",
+    "build:worker": "esbuild src/sync-worker.ts --bundle --platform=node --format=esm --outfile=dist/sync-worker.mjs --external:better-sqlite3 --packages=external"
   },
   "devDependencies": {
     "@types/node": "^25.6.0"
